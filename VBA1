@@ -1,0 +1,64 @@
+Sub TransformReport()
+    Dim wsA As Worksheet, wsB As Worksheet, wsCust As Worksheet, wsProd As Worksheet
+    Dim lastA As Long, lastB As Long, i As Long, r As Long
+    Dim resCustName, resCustReg, resProdCode, resProdDesc
+    Dim q As Double, p As Double, d As Double
+    
+    Set wsA = Sheets("M2_Report_A")
+    Set wsB = Sheets("M2_Output_B")
+    Set wsCust = Sheets("M2_Customer_Map")
+    Set wsProd = Sheets("M2_Product_Map")
+    
+    ' 1. 清空舊資料（保留前 3 行標題，從第 4 行開始清除）
+    lastB = wsB.Cells(wsB.Rows.Count, "A").End(xlUp).Row
+    If lastB >= 4 Then wsB.Range("A4:O" & lastB).ClearContents
+    
+    ' 2. 逐行讀取 Report A 並寫入 Output B（資料從第 4 行開始寫入）
+    lastA = wsA.Cells(wsA.Rows.Count, "A").End(xlUp).Row
+    r = 4
+    
+    For i = 4 To lastA
+        If wsA.Cells(i, 1).Value <> "" Then
+            ' 基本欄位
+            wsB.Cells(r, 1).Value = wsA.Cells(i, 1).Value  ' 日期
+            wsB.Cells(r, 2).Value = wsA.Cells(i, 2).Value  ' 單號
+            wsB.Cells(r, 3).Value = wsA.Cells(i, 3).Value  ' 類型
+            wsB.Cells(r, 4).Value = wsA.Cells(i, 4).Value  ' 客戶代號
+            
+            ' VLookup 對照
+            resCustName = Application.VLookup(wsA.Cells(i, 4).Value, wsCust.Range("A3:C999"), 2, False)
+            resCustReg = Application.VLookup(wsA.Cells(i, 4).Value, wsCust.Range("A3:C999"), 3, False)
+            resProdCode = Application.VLookup(wsA.Cells(i, 6).Value, wsProd.Range("A3:C999"), 2, False)
+            resProdDesc = Application.VLookup(wsA.Cells(i, 6).Value, wsProd.Range("A3:C999"), 3, False)
+            
+            ' 填入對照結果
+            wsB.Cells(r, 5).Value = IIf(IsError(resCustName), "Not Found", resCustName)
+            wsB.Cells(r, 6).Value = IIf(IsError(resCustReg), "Not Found", resCustReg)
+            wsB.Cells(r, 7).Value = IIf(IsError(resProdCode), wsA.Cells(i, 6).Value, resProdCode)
+            wsB.Cells(r, 8).Value = IIf(IsError(resProdDesc), wsA.Cells(i, 7).Value, resProdDesc)
+            
+            ' 數值與計算 (第 9 到 14 欄)
+            q = Val(wsA.Cells(i, 8).Value)
+            p = Val(wsA.Cells(i, 9).Value)
+            d = Val(wsA.Cells(i, 10).Value)
+            
+            wsB.Cells(r, 9).Value = q                 ' 數量
+            wsB.Cells(r, 10).Value = p                ' 單價
+            wsB.Cells(r, 11).Value = d                ' 折扣
+            wsB.Cells(r, 12).Value = q * p * (1 - d)  ' 淨額
+            wsB.Cells(r, 13).Value = wsA.Cells(i, 11).Value ' 業務
+            wsB.Cells(r, 14).Value = i                      ' 來源行數
+            
+            ' 驗證狀態
+            If IsError(resCustName) Or IsError(resProdCode) Then
+                wsB.Cells(r, 15).Value = "Invalid"
+            Else
+                wsB.Cells(r, 15).Value = "Valid"
+            End If
+            
+            r = r + 1
+        End If
+    Next i
+    
+    MsgBox "完成！", vbInformation
+End Sub
