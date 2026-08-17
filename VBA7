@@ -1,0 +1,144 @@
+Sub TransformReport()
+    Dim wsA As Worksheet, wsB As Worksheet, wsCust As Worksheet, wsProd As Worksheet
+    Dim lastA As Long, lastB As Long, i As Long, r As Long
+    Dim colTxnDate As Long, colDocNo As Long, colDocType As Long, colCustCode As Long
+    Dim colItemSKU As Long, colItemDesc As Long, colQty As Long, colPrice As Long
+    Dim colDisc As Long, colSalesRep As Long
+    Dim resCustName, resCustReg, resProdCode, resProdDesc
+    Dim p As Double, d As Double, absQty As Double, baseNetAmt As Double
+    Dim skipCount As Long, logMsg As String
+    Dim rawCust As String, rawSku As String, normCust As String, normSku As String
+    Dim docTypeVal As String
+    
+    Set wsA = Sheets("M2_Report_A")
+    Set wsB = Sheets("M2_Output_B")
+    Set wsCust = Sheets("M2_Customer_Map")
+    Set wsProd = Sheets("M2_Product_Map")
+    
+    ' 1. 動態尋找 Report A (第 3 行) 各標題對應的欄位編號
+    colTxnDate = FindHeader(wsA, 3, "Txn Date")
+    colDocNo = FindHeader(wsA, 3, "Doc No")
+    colDocType = FindHeader(wsA, 3, "Doc Type")
+    colCustCode = FindHeader(wsA, 3, "Cust Code")
+    colItemSKU = FindHeader(wsA, 3, "Item SKU")
+    colItemDesc = FindHeader(wsA, 3, "Item Description")
+    colQty = FindHeader(wsA, 3, "Qty")
+    colPrice = FindHeader(wsA, 3, "Unit Price")
+    colDisc = FindHeader(wsA, 3, "Discount")
+    colSalesRep = FindHeader(wsA, 3, "Sales Rep")
+    
+    ' 防呆檢查：若有關鍵標題找不到則終止
+    If colTxnDate = 0 Or colDocNo = 0 Or colCustCode = 0 Or colItemSKU = 0 Or colQty = 0 Or colPrice = 0 Then
+        MsgBox "錯誤：無法在 M2_Report_A 找到必要的欄位標題，請檢查第 3 行標題名稱！", vbCritical
+        Exit Sub
+    End If
+    
+    ' 2. 清空舊資料（保留前 3 行標題，從第 4 行開始清除）
+    lastB = wsB.Cells(wsB.Rows.Count, "A").End(xlUp).Row
+    If lastB >= 4 Then wsB.Range("A4:O" & lastB).ClearContents
+    
+    ' 3. 逐行讀取 Report A 並寫入 Output B（資料從第 4 行開始寫入）
+    lastA = wsA.Cells(wsA.Rows.Count, "A").End(xlUp).Row
+    r = 4
+    skipCount = 0
+    logMsg = "=== 資料處理與略過記錄 ===" & vbCrLf
+    
+    For i = 4 To lastA
+        If wsA.Cells(i, colTxnDate).Value <> "" Then
+            Dim docVal As String
+            docVal = Trim(wsA.Cells(i, colDocNo).Value)
+            docTypeVal = Trim(wsA.Cells(i, colDocType).Value)
+            
+            ' 正規化 Customer Code 與 SKU
+            rawCust = wsA.Cells(i, colCustCode).Value
+            rawSku = wsA.Cells(i, colItemSKU).Value
+            normCust = UCase(Trim(rawCust))
+            normSku = UCase(Trim(rawSku))
+            
+            ' 略過關鍵欄位空白的資料列 (Doc No, Cust Code, SKU)
+            If docVal = "" Or normCust = "" Or normSku = "" Then
+                skipCount = skipCount + 1
+                logMsg = logMsg & "來源行 " & i & " 被略過原因: " & _
+                         IIf(docVal = "", "[Doc No 空白] ", "") & _
+                         IIf(normCust = "", "[Cust Code 空白] ", "") & _
+                         IIf(normSku = "", "[Item SKU 空白]", "") & vbCrLf
+            Else
+                ' VLookup 對照客戶與產品
+                resCustName = Application.VLookup(normCust, wsCust.Range("A3:C20"), 2, False)
+                resCustReg = Application.VLookup(normCust, wsCust.Range("A3:C20"), 3, False)
+                resProdCode = Application.VLookup(normSku, wsProd.Range("A3:C20"), 2, False)
+                resProdDesc = Application.VLookup(normSku, wsProd.Range("A3:C20"), 3, False)
+                
+                ' === 嚴格依照 Schema 寫入 1 到 15 欄 ===
+                
+                ' Col 1: Report Date
+                wsB.Cells(r, 1).Value = wsA.Cells(i, colTxnDate).Value  
+                ' Col 2: Document No
+                wsB.Cells(r, 2).Value = docVal                          
+                ' Col 3: Document Type
+                wsB.Cells(r, 3).Value = docTypeVal                      
+                ' Col 4: Customer ID
+                wsB.Cells(r, 4).Value = normCust                        
+                ' Col 5: Customer Name
+                wsB.Cells(r, 5).Value = IIf(IsError(resCustName), "Not Found", resCustName)
+                ' Col 6: Region
+                wsB.Cells(r, 6).Value = IIf(IsError(resCustReg), "Not Found", resCustReg)
+                ' Col 7: Product Code
+                wsB.Cells(r, 7).Value = IIf(IsError(resProdCode), normSku, resProdCode)
+                ' Col 8: Product Description
+                wsB.Cells(r, 8).Value = IIf(IsError(resProdDesc), wsA.Cells(i, colItemDesc).Value, resProdDesc)
+                
+                ' 數值讀取與計算 (Net Amount = ABS(Quantity) * Unit Price * (1 - Discount %))
+                absQty = Abs(Val(wsA.Cells(i, colQty).Value))
+                p = Val(wsA.Cells(i, colPrice).Value)
+                d = IIf(colDisc > 0, Val(wsA.Cells(i, colDisc).Value), 0)
+                baseNetAmt = absQty * p * (1 - d)
+                
+                ' 根據 Doc Type 賦予正負號
+                If UCase(docTypeVal) = "RETURN" Then
+                    wsB.Cells(r, 9).Value = -absQty         ' Col 9: Quantity (負數)
+                    wsB.Cells(r, 12).Value = -baseNetAmt    ' Col 12: Net Amount (HKD) (負數)
+                Else
+                    wsB.Cells(r, 9).Value = absQty          ' Col 9: Quantity
+                    wsB.Cells(r, 12).Value = baseNetAmt     ' Col 12: Net Amount (HKD)
+                End If
+                
+                ' Col 10: Unit Price (HKD)
+                wsB.Cells(r, 10).Value = p                
+                ' Col 11: Discount %
+                wsB.Cells(r, 11).Value = d                
+                
+                ' Col 13: Salesperson
+                wsB.Cells(r, 13).Value = IIf(colSalesRep > 0, wsA.Cells(i, colSalesRep).Value, "") 
+                ' Col 14: Source Row
+                wsB.Cells(r, 14).Value = i                                                      
+                
+                ' Col 15: Validation Status
+                If IsError(resCustName) Or IsError(resProdCode) Then
+                    wsB.Cells(r, 15).Value = "Invalid"
+                Else
+                    wsB.Cells(r, 15).Value = "Valid"
+                End If
+                
+                r = r + 1
+            End If
+        End If
+    Next i
+    
+    ' 顯示完成與略過統計日誌
+    logMsg = logMsg & vbCrLf & "總計略過無效資料列數: " & skipCount
+    MsgBox "資料處理完成（完整符合 15 欄 Schema 輸出要求）！" & vbCrLf & vbCrLf & logMsg, vbInformation
+End Sub
+
+' 輔助函數：用來按標題名稱動態尋找欄位編號
+Function FindHeader(ws As Worksheet, headerRow As Long, headerName As String) As Long
+    Dim lastCol As Long, col As Long
+    lastCol = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
+    For col = 1 To lastCol
+        If Trim(ws.Cells(headerRow, col).Value) = headerName Then
+            FindHeader = col
+            Exit Function
+        End If
+    Next col
+    FindHeader = 0
+End Function
