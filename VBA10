@@ -1,0 +1,254 @@
+Sub TransformReport()
+    Dim wsA As Worksheet, wsB As Worksheet, wsCust As Worksheet, wsProd As Worksheet
+    Dim lastA As Long, lastB As Long, lastColA As Long
+    Dim lastCust As Long, lastProd As Long
+    Dim i As Long, r As Long, outRow As Long
+    Dim colTxnDate As Long, colDocNo As Long, colDocType As Long, colCustCode As Long
+    Dim colItemSKU As Long, colItemDesc As Long, colQty As Long, colPrice As Long
+    Dim colDisc As Long, colSalesRep As Long
+    Dim p As Double, d As Double, absQty As Double, baseNetAmt As Double
+    Dim skipCount As Long, logMsg As String
+    Dim rawCust As String, rawSku As String, normCust As String, normSku As String
+    Dim docTypeVal As String
+    
+    ' 統計與訊息變數
+    Dim rowsProcessed As Long, rowsOutput As Long, rowsRejected As Long
+    Dim finalMsg As String
+    
+    ' 陣列與字典物件宣告
+    Dim arrA As Variant, arrB As Variant
+    Dim arrCust As Variant, arrProd As Variant
+    Dim dictCust As Object, dictProd As Object
+    
+    ' 記錄原本的系統設定以便稍後還原
+    Dim calcState As Long
+    calcState = Application.Calculation
+    
+    ' ---------------------------------------------------------
+    ' 建立錯誤處理機制與關閉系統更新以提升效能
+    ' ---------------------------------------------------------
+    On Error GoTo ErrorHandler
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.EnableEvents = False
+    
+    Set wsA = Sheets("M2_Report_A")
+    Set wsB = Sheets("M2_Output_B")
+    Set wsCust = Sheets("M2_Customer_Map")
+    Set wsProd = Sheets("M2_Product_Map")
+    
+    ' ---------------------------------------------------------
+    ' 1. 將對照表讀入陣列，並轉換為 Dictionary (解除範圍限制，動態向下)
+    ' ---------------------------------------------------------
+    Set dictCust = CreateObject("Scripting.Dictionary")
+    Set dictProd = CreateObject("Scripting.Dictionary")
+    
+    ' 客戶對照表
+    lastCust = wsCust.Cells(wsCust.Rows.Count, "A").End(xlUp).Row
+    If lastCust >= 3 Then
+        arrCust = wsCust.Range("A3:C" & lastCust).Value
+        If IsArray(arrCust) Then
+            For i = 1 To UBound(arrCust)
+                If Trim(CStr(arrCust(i, 1))) <> "" Then
+                    dictCust(UCase(Trim(CStr(arrCust(i, 1))))) = Array(CStr(arrCust(i, 2)), CStr(arrCust(i, 3)))
+                End If
+            Next i
+        Else
+            If Trim(CStr(wsCust.Range("A3").Value)) <> "" Then
+                dictCust(UCase(Trim(CStr(wsCust.Range("A3").Value)))) = Array(CStr(wsCust.Range("B3").Value), CStr(wsCust.Range("C3").Value))
+            End If
+        End If
+    End If
+    
+    ' 產品對照表
+    lastProd = wsProd.Cells(wsProd.Rows.Count, "A").End(xlUp).Row
+    If lastProd >= 3 Then
+        arrProd = wsProd.Range("A3:C" & lastProd).Value
+        If IsArray(arrProd) Then
+            For i = 1 To UBound(arrProd)
+                If Trim(CStr(arrProd(i, 1))) <> "" Then
+                    dictProd(UCase(Trim(CStr(arrProd(i, 1))))) = Array(CStr(arrProd(i, 2)), CStr(arrProd(i, 3)))
+                End If
+            Next i
+        Else
+            If Trim(CStr(wsProd.Range("A3").Value)) <> "" Then
+                dictProd(UCase(Trim(CStr(wsProd.Range("A3").Value)))) = Array(CStr(wsProd.Range("B3").Value), CStr(wsProd.Range("C3").Value))
+            End If
+        End If
+    End If
+    
+    ' ---------------------------------------------------------
+    ' 2. 將 Source Report A 讀入記憶體陣列
+    ' ---------------------------------------------------------
+    lastA = wsA.Cells(wsA.Rows.Count, "A").End(xlUp).Row
+    lastColA = wsA.Cells(3, wsA.Columns.Count).End(xlToLeft).Column
+    arrA = wsA.Range(wsA.Cells(3, 1), wsA.Cells(lastA, lastColA)).Value
+    
+    ' 動態尋找標題對應的陣列欄位索引
+    For i = 1 To UBound(arrA, 2)
+        Select Case Trim(CStr(arrA(1, i)))
+            Case "Txn Date": colTxnDate = i
+            Case "Doc No": colDocNo = i
+            Case "Doc Type": colDocType = i
+            Case "Cust Code": colCustCode = i
+            Case "Item SKU": colItemSKU = i
+            Case "Item Description": colItemDesc = i
+            Case "Qty": colQty = i
+            Case "Unit Price": colPrice = i
+            Case "Discount": colDisc = i
+            Case "Sales Rep": colSalesRep = i
+        End Select
+    Next i
+    
+    If colTxnDate = 0 Or colDocNo = 0 Or colCustCode = 0 Or colItemSKU = 0 Or colQty = 0 Or colPrice = 0 Then
+        MsgBox "錯誤：無法找到必要的欄位標題！", vbCritical
+        GoTo ExitHandler
+    End If
+    
+    ' ---------------------------------------------------------
+    ' 3. 初始化輸出陣列
+    ' ---------------------------------------------------------
+    ReDim arrB(1 To UBound(arrA, 1), 1 To 15)
+    outRow = 1
+    skipCount = 0
+    logMsg = "=== 拒絕/略過記錄詳情 ===" & vbCrLf
+    
+    ' ---------------------------------------------------------
+    ' 4. 迴圈處理資料
+    ' ---------------------------------------------------------
+    For i = 2 To UBound(arrA, 1) ' 第 1 列為標題
+        If Trim(CStr(arrA(i, colTxnDate))) <> "" Then
+            
+            docVal = Trim(CStr(arrA(i, colDocNo)))
+            docTypeVal = Trim(CStr(arrA(i, colDocType)))
+            rawCust = CStr(arrA(i, colCustCode))
+            rawSku = CStr(arrA(i, colItemSKU))
+            normCust = UCase(Trim(rawCust))
+            normSku = UCase(Trim(rawSku))
+            
+            ' 略過關鍵欄位空白
+            If docVal = "" Or normCust = "" Or normSku = "" Then
+                skipCount = skipCount + 1
+                logMsg = logMsg & "來源行 " & (i + 2) & " 略過: " & _
+                         IIf(docVal = "", "[Doc No 空白] ", "") & _
+                         IIf(normCust = "", "[Cust Code 空白] ", "") & _
+                         IIf(normSku = "", "[Item SKU 空白]", "") & vbCrLf
+            Else
+                ' --- 字典查找對照 ---
+                Dim cName As String, cReg As String, pCode As String, pDesc As String
+                Dim isValid As Boolean: isValid = True
+                
+                If dictCust.exists(normCust) Then
+                    cName = dictCust(normCust)(0)
+                    cReg = dictCust(normCust)(1)
+                Else
+                    cName = "Not Found": cReg = "Not Found": isValid = False
+                End If
+                
+                If dictProd.exists(normSku) Then
+                    pCode = dictProd(normSku)(0)
+                    pDesc = dictProd(normSku)(1)
+                Else
+                    pCode = normSku
+                    pDesc = CStr(arrA(i, colItemDesc))
+                    isValid = False
+                End If
+                
+                ' --- 寫入輸出陣列 ---
+                arrB(outRow, 1) = arrA(i, colTxnDate) ' Date
+                arrB(outRow, 2) = docVal              ' Doc No
+                arrB(outRow, 3) = docTypeVal          ' Type
+                arrB(outRow, 4) = normCust            ' Cust ID
+                arrB(outRow, 5) = cName               ' Cust Name
+                arrB(outRow, 6) = cReg                ' Region
+                arrB(outRow, 7) = pCode               ' Prod Code
+                arrB(outRow, 8) = pDesc               ' Prod Desc
+                
+                ' --- 計算數值 ---
+                absQty = Abs(Val(CStr(arrA(i, colQty))))
+                p = Val(CStr(arrA(i, colPrice)))
+                d = IIf(colDisc > 0, Val(CStr(arrA(i, colDisc))), 0)
+                baseNetAmt = absQty * p * (1 - d)
+                
+                If UCase(docTypeVal) = "RETURN" Then
+                    arrB(outRow, 9) = -absQty         ' Qty (負)
+                    arrB(outRow, 12) = -baseNetAmt    ' Net Amt (負)
+                Else
+                    arrB(outRow, 9) = absQty
+                    arrB(outRow, 12) = baseNetAmt
+                End If
+                
+                arrB(outRow, 10) = p                  ' Unit Price
+                arrB(outRow, 11) = d                  ' Discount
+                arrB(outRow, 13) = IIf(colSalesRep > 0, CStr(arrA(i, colSalesRep)), "") ' SalesRep
+                arrB(outRow, 14) = i + 2              ' Source Row
+                arrB(outRow, 15) = IIf(isValid, "Valid", "Invalid") ' Status
+                
+                outRow = outRow + 1
+            End If
+        End If
+    Next i
+    
+    ' ---------------------------------------------------------
+    ' 5. 將結果寫入 Output B、格式化與排序
+    ' ---------------------------------------------------------
+    lastB = wsB.Cells(wsB.Rows.Count, "A").End(xlUp).Row
+    If lastB >= 4 Then wsB.Range("A4:O" & lastB).ClearContents
+    
+    If outRow > 1 Then
+        Dim writeRange As Range
+        Set writeRange = wsB.Range("A4").Resize(outRow - 1, 15)
+        writeRange.Value = arrB
+        
+        ' 格式化
+        wsB.Range("A4:A" & (3 + outRow - 1)).NumberFormat = "yyyy/mm/dd"
+        wsB.Range("J4:J" & (3 + outRow - 1)).NumberFormat = "#,##0.00"
+        wsB.Range("K4:K" & (3 + outRow - 1)).NumberFormat = "0.0%"
+        wsB.Range("L4:L" & (3 + outRow - 1)).NumberFormat = "#,##0.00"
+        
+        ' 多重條件排序: Date -> Doc No -> Product Code
+        With wsB.Sort
+            .SortFields.Clear
+            .SortFields.Add Key:=wsB.Range("A4:A" & (3 + outRow - 1)), Order:=xlAscending
+            .SortFields.Add Key:=wsB.Range("B4:B" & (3 + outRow - 1)), Order:=xlAscending
+            .SortFields.Add Key:=wsB.Range("G4:G" & (3 + outRow - 1)), Order:=xlAscending
+            .SetRange writeRange
+            .Header = xlNo
+            .MatchCase = False
+            .Orientation = xlTopToBottom
+            .SortMethod = xlPinYin
+            .Apply
+        End With
+    End If
+    
+    ' ---------------------------------------------------------
+    ' 6. 產生執行結果摘要訊息
+    ' ---------------------------------------------------------
+    rowsProcessed = UBound(arrA, 1) - 1 ' 扣除標題列
+    rowsOutput = outRow - 1
+    rowsRejected = skipCount
+    
+    finalMsg = "自動化轉換執行完畢！" & vbCrLf & vbCrLf & _
+               "▶ 總處理列數 (Rows Processed): " & rowsProcessed & vbCrLf & _
+               "▶ 成功輸出列數 (Rows Output): " & rowsOutput & vbCrLf & _
+               "▶ 拒絕/略過列數 (Rows Rejected): " & rowsRejected
+               
+    If rowsRejected > 0 Then
+        finalMsg = finalMsg & vbCrLf & vbCrLf & logMsg
+    End If
+    
+    MsgBox finalMsg, vbInformation, "處理結果總結"
+
+' ---------------------------------------------------------
+' 7. 錯誤與退出處理區塊
+' ---------------------------------------------------------
+ExitHandler:
+    Application.ScreenUpdating = True
+    Application.Calculation = calcState
+    Application.EnableEvents = True
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "發生非預期錯誤：" & vbCrLf & "錯誤代碼：" & Err.Number & vbCrLf & "描述：" & Err.Description, vbCritical
+    Resume ExitHandler
+End Sub
